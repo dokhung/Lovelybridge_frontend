@@ -1,30 +1,26 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-    Animated,
-    BackHandler,
-    Dimensions,
-    Modal,
-    Pressable,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
-} from "react-native";
-import {
-    Circle,
-    Defs,
-    LinearGradient,
-    Path,
-    Pattern,
-    Rect,
-    Stop,
-    Svg,
-    Text as SvgText,
-} from "react-native-svg";
+import { Animated, AppState, Dimensions, View } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { Locale, useI18n, type TranslationKey } from "../i18n/i18n";
+import HomeBackground from "./home/HomeBackground";
+import HomeMain from "./home/HomeMain";
+import HomeModals from "./home/HomeModals";
+import useClickSound from "./home/useClickSound";
+import {
+    applyAuthTokens,
+    auth,
+    clearAuthTokens,
+    loadAuthTokens,
+    loadSessionTimeoutMinutes,
+    saveAuthTokens,
+    saveSessionTimeoutMinutes,
+    setAuthRefreshPath,
+    setAuthRefreshFailureHandler,
+    setupAuthInterceptors,
+} from "../request";
 
 type ActionKey = "login" | "signup" | "exit";
+type PostLoginTarget = { name: "Start" | "ProfileHome"; params?: { nickname: string; gender: string | null } };
 
 export default function Home() {
     const navigation = useNavigation();
@@ -46,6 +42,12 @@ export default function Home() {
     // ✅ 초기 진입에서 모달이 덮지 않게 false
     const [showLoginModal, setShowLoginModal] = useState(false);
     const [showSignupModal, setShowSignupModal] = useState(false);
+    const [showLoginSuccessModal, setShowLoginSuccessModal] = useState(false);
+    const [postLoginTarget, setPostLoginTarget] = useState<PostLoginTarget>({ name: "Start" });
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
+    const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState(30);
+    const [showRefreshFailedModal, setShowRefreshFailedModal] = useState(false);
+    const [showDevNoticeModal, setShowDevNoticeModal] = useState(false);
     const [showSettingsModal, setShowSettingsModal] = useState(false);
     const [showExitModal, setShowExitModal] = useState(false);
 
@@ -55,6 +57,7 @@ export default function Home() {
     const [signupEmail, setSignupEmail] = useState("");
     const [signupNickname, setSignupNickname] = useState("");
     const [signupPassword, setSignupPassword] = useState("");
+    const [signupPasswordConfirm, setSignupPasswordConfirm] = useState("");
     const [signupError, setSignupError] = useState<string | null>(null);
     const [showSettingsToast, setShowSettingsToast] = useState(false);
     const settingsToastAnim = useRef(new Animated.Value(0)).current;
@@ -66,6 +69,7 @@ export default function Home() {
     const titlePulse = useRef(new Animated.Value(1)).current;
     const actionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const shimmerAnim = useRef(new Animated.Value(0)).current;
+    const { playClick } = useClickSound();
 
     const bubbles = useMemo(() => {
         const { width, height } = Dimensions.get("window");
@@ -216,6 +220,7 @@ export default function Home() {
     }, []);
 
     const toggleActions = () => {
+        playClick();
         if (showActions) {
             Animated.parallel([
                 Animated.timing(titleLift, {
@@ -268,11 +273,37 @@ export default function Home() {
     const closeAuthModal = () => {
         setShowLoginModal(false);
         setLoginError(null);
+        setShowActions(true);
+        setActiveAction(null);
     };
 
     const closeSignupModal = () => {
         setShowSignupModal(false);
         setSignupError(null);
+        setShowActions(true);
+        setActiveAction(null);
+    };
+
+    const closeLoginSuccessModal = () => {
+        setShowLoginSuccessModal(false);
+        navigation.reset({
+            index: 0,
+            routes: [
+                {
+                    name: postLoginTarget.name as never,
+                    ...(postLoginTarget.params ? ({ params: postLoginTarget.params } as never) : {}),
+                } as never,
+            ],
+        });
+    };
+
+    const requireLogin = (message?: string) => {
+        setShowLoginModal(true);
+        if (message) setLoginError(message);
+    };
+
+    const handleRefreshFailed = () => {
+        setShowRefreshFailedModal(true);
     };
 
     const closeSettingsModal = () => {
@@ -283,10 +314,85 @@ export default function Home() {
         setShowExitModal(false);
     };
 
-    const isValidEmail = (value: string) => /\S+@\S+\.\S+/.test(value.trim());
-    const hasEnglishSentence = (value: string) => /[A-Za-z]+ [A-Za-z]+/.test(value.trim());
+    const closeDevNoticeModal = () => {
+        setShowDevNoticeModal(false);
+    };
 
-    const handleLoginSubmit = () => {
+    const isValidEmail = (value: string) => /\S+@\S+\.\S+/.test(value.trim());
+    const hasLetterNumberMinLength = (value: string) =>
+        /^(?=.*[A-Za-z])(?=.*\d).{6,}$/.test(value.trim());
+
+    const getErrorMessage = (data: any, fallback: string) => {
+        if (!data) return fallback;
+        if (typeof data === "string" && /<html|<!doctype/i.test(data)) {
+            return fallback;
+        }
+        if (typeof data === "string") return data;
+        if (typeof data.detail === "string") return data.detail;
+        if (typeof data.message === "string") return data.message;
+        if (typeof data.error === "string") return data.error;
+        if (Array.isArray(data.non_field_errors) && data.non_field_errors[0]) {
+            return data.non_field_errors[0];
+        }
+        const firstKey = Object.keys(data)[0];
+        if (firstKey && Array.isArray(data[firstKey]) && data[firstKey][0]) {
+            return data[firstKey][0];
+        }
+        return fallback;
+    };
+
+    const checkSession = async () => {
+        const stored = await loadAuthTokens();
+        if (!stored) {
+            setIsLoggedIn(false);
+            return;
+        }
+        const lastLoginAt = stored.lastLoginAt ?? 0;
+        const timeoutMs = sessionTimeoutMinutes * 60 * 1000;
+        if (lastLoginAt && Date.now() - lastLoginAt > timeoutMs) {
+            await clearAuthTokens();
+            setIsLoggedIn(false);
+            requireLogin(tt("sessionExpired"));
+            return;
+        }
+        applyAuthTokens(stored.access);
+        setIsLoggedIn(true);
+    };
+
+    useEffect(() => {
+        setAuthRefreshPath("/api/auth/refresh/");
+        setAuthRefreshFailureHandler(handleRefreshFailed);
+        setupAuthInterceptors();
+    }, []);
+
+    useEffect(() => {
+        let active = true;
+        (async () => {
+            const minutes = await loadSessionTimeoutMinutes();
+            if (!active) return;
+            setSessionTimeoutMinutes(minutes);
+        })();
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        checkSession();
+        const subscription = AppState.addEventListener("change", (state) => {
+            if (state === "active") {
+                checkSession();
+            }
+        });
+        return () => subscription.remove();
+    }, [sessionTimeoutMinutes]);
+
+    const handleSessionTimeoutChange = (minutes: number) => {
+        setSessionTimeoutMinutes(minutes);
+        saveSessionTimeoutMinutes(minutes).catch(() => undefined);
+    };
+
+    const handleLoginSubmit = async () => {
         if (!isValidEmail(loginEmail)) {
             setLoginError(tt("errorEmail"));
             return;
@@ -296,10 +402,43 @@ export default function Home() {
             return;
         }
         setLoginError(null);
-        closeAuthModal();
+
+        try {
+            const response = await auth.login({
+                email: loginEmail.trim(),
+                password: loginPassword,
+            });
+            await saveAuthTokens(response.data);
+            setIsLoggedIn(true);
+            setShowLoginModal(false);
+
+            try {
+                const hasProfile = response.data.has_profile ?? (await auth.checkProfileExists());
+                if (hasProfile) {
+                    const profile = await auth.getProfile();
+                    setPostLoginTarget({
+                        name: "ProfileHome",
+                        params: {
+                            nickname: profile.nickname ?? "",
+                            gender: profile.gender ?? null,
+                        },
+                    });
+                } else {
+                    setPostLoginTarget({ name: "Start" });
+                }
+            } catch {
+                // If profile check fails, fall back to normal login success flow.
+                setPostLoginTarget({ name: "Start" });
+            }
+
+            setShowLoginSuccessModal(true);
+        } catch (error: any) {
+            const message = getErrorMessage(error?.response?.data, tt("errorLoginFailed"));
+            setLoginError(message);
+        }
     };
 
-    const handleSignupSubmit = () => {
+    const handleSignupSubmit = async () => {
         if (!isValidEmail(signupEmail)) {
             setSignupError(tt("errorEmail"));
             return;
@@ -308,12 +447,38 @@ export default function Home() {
             setSignupError(tt("errorNickname"));
             return;
         }
-        if (!hasEnglishSentence(signupPassword)) {
+        if (!hasLetterNumberMinLength(signupPassword)) {
             setSignupError(tt("errorPasswordSentence"));
             return;
         }
+        if (signupPassword !== signupPasswordConfirm) {
+            setSignupError(tt("errorPasswordConfirm"));
+            return;
+        }
         setSignupError(null);
-        setShowSignupModal(false);
+
+        const trimmedNickname = signupNickname.trim();
+        const [firstName, ...rest] = trimmedNickname.split(" ");
+        const lastName = rest.join(" ");
+        const normalizedUsername = trimmedNickname.replace(/\s+/g, "");
+
+        try {
+            await auth.register({
+                username: normalizedUsername || trimmedNickname,
+                password: signupPassword,
+                email: signupEmail.trim(),
+                first_name: firstName ?? "",
+                last_name: lastName ?? "",
+            });
+            setShowSignupModal(false);
+            setLoginEmail(signupEmail.trim());
+            setLoginPassword(signupPassword);
+            setLoginError(null);
+            setShowLoginModal(true);
+        } catch (error: any) {
+            const message = getErrorMessage(error?.response?.data, tt("errorSignupFailed"));
+            setSignupError(message);
+        }
     };
 
     const options: { label: string; value: Locale }[] = [
@@ -340,1066 +505,114 @@ export default function Home() {
         }, 1400);
     };
 
+    const handleLoginPress = () => {
+        playClick();
+        setShowLoginModal(true);
+        setLoginError(null);
+    };
+
+    const handleSignupPress = () => {
+        playClick();
+        setShowSignupModal(true);
+        setSignupError(null);
+    };
+
+    const handleExitPress = () => {
+        playClick();
+        setShowExitModal(true);
+    };
+
+    const handleSettingsPress = () => {
+        playClick();
+        setShowSettingsModal(true);
+    };
+
+    const handleGoogleLoginPress = () => {
+        playClick();
+        setShowDevNoticeModal(true);
+    };
+
+    const handleLogout = async () => {
+        await clearAuthTokens();
+        setIsLoggedIn(false);
+        setShowSettingsModal(false);
+        requireLogin();
+    };
+
+    const closeRefreshFailedModal = () => {
+        setShowRefreshFailedModal(false);
+        requireLogin();
+    };
+
     return (
         <View style={{ flex: 1, backgroundColor: "#FFF4F8" }}>
-            {/* background bubbles */}
-            <View style={StyleSheet.absoluteFill} pointerEvents="none">
-                {bubbles.map((bubble, index) => {
-                    const floatY = bubbleAnims[index].interpolate({
-                        inputRange: [0, 1],
-                        outputRange: [-bubble.driftY, bubble.driftY],
-                    });
-                    const floatX = bubbleAnims[index].interpolate({
-                        inputRange: [0, 1],
-                        outputRange: [-bubble.driftX, bubble.driftX],
-                    });
-
-                    return (
-                        <Animated.View
-                            key={bubble.key}
-                            style={{
-                                position: "absolute",
-                                width: bubble.size,
-                                height: bubble.size,
-                                borderRadius: bubble.size / 2,
-                                backgroundColor: "#FFD6E7",
-                                opacity: bubble.opacity,
-                                top: bubble.y,
-                                left: bubble.x,
-                                transform: [{ translateX: floatX }, { translateY: floatY }],
-                            }}
-                        />
-                    );
-                })}
-            </View>
-
-            <View
-                style={{
-                    flex: 1,
-                    alignItems: "center",
-                    justifyContent: "center",
-                    paddingHorizontal: 24,
+            <HomeBackground bubbles={bubbles} bubbleAnims={bubbleAnims} />
+            <HomeMain
+                tt={tt}
+                showActions={showActions}
+                hintBlink={hintBlink}
+                titleLift={titleLift}
+                titlePulse={titlePulse}
+                toggleActions={toggleActions}
+                actionsFade={actionsFade}
+                activeAction={activeAction}
+                onLoginPress={handleLoginPress}
+                onSignupPress={handleSignupPress}
+                onExitPress={handleExitPress}
+                onSettingsPress={handleSettingsPress}
+            />
+            <HomeModals
+                tt={tt}
+                hearts={hearts}
+                heartAnims={heartAnims}
+                shimmerAnim={shimmerAnim}
+                showLoginModal={showLoginModal}
+                showLoginSuccessModal={showLoginSuccessModal}
+                showRefreshFailedModal={showRefreshFailedModal}
+                showDevNoticeModal={showDevNoticeModal}
+                closeAuthModal={closeAuthModal}
+                closeLoginSuccessModal={closeLoginSuccessModal}
+                closeRefreshFailedModal={closeRefreshFailedModal}
+                closeDevNoticeModal={closeDevNoticeModal}
+                loginEmail={loginEmail}
+                setLoginEmail={setLoginEmail}
+                loginPassword={loginPassword}
+                setLoginPassword={setLoginPassword}
+                loginError={loginError}
+                handleLoginSubmit={handleLoginSubmit}
+                onGoogleLoginPress={handleGoogleLoginPress}
+                showSignupModal={showSignupModal}
+                closeSignupModal={closeSignupModal}
+                signupEmail={signupEmail}
+                setSignupEmail={setSignupEmail}
+                signupNickname={signupNickname}
+                setSignupNickname={setSignupNickname}
+                signupPassword={signupPassword}
+                setSignupPassword={setSignupPassword}
+                signupPasswordConfirm={signupPasswordConfirm}
+                setSignupPasswordConfirm={setSignupPasswordConfirm}
+                signupError={signupError}
+                handleSignupSubmit={handleSignupSubmit}
+                showSettingsModal={showSettingsModal}
+                closeSettingsModal={closeSettingsModal}
+                onLogout={handleLogout}
+                showLogout={isLoggedIn}
+                sessionTimeoutMinutes={sessionTimeoutMinutes}
+                setSessionTimeoutMinutes={handleSessionTimeoutChange}
+                locale={locale}
+                options={options}
+                setLocale={setLocale}
+                showSavedToast={showSavedToast}
+                showSettingsToast={showSettingsToast}
+                settingsToastAnim={settingsToastAnim}
+                showExitModal={showExitModal}
+                closeExitModal={closeExitModal}
+                onSwitchToLogin={() => {
+                    playClick();
+                    setShowSignupModal(false);
+                    setShowLoginModal(true);
                 }}
-            >
-                {/* glow blobs */}
-                <View
-                    pointerEvents="none"
-                    style={{
-                        position: "absolute",
-                        top: 60,
-                        left: -40,
-                        width: 220,
-                        height: 220,
-                        borderRadius: 110,
-                        backgroundColor: "#FFE0EE",
-                        opacity: 0.7,
-                    }}
-                />
-                <View
-                    pointerEvents="none"
-                    style={{
-                        position: "absolute",
-                        bottom: 110,
-                        right: -70,
-                        width: 260,
-                        height: 260,
-                        borderRadius: 130,
-                        backgroundColor: "#FFD1E6",
-                        opacity: 0.55,
-                    }}
-                />
-
-                {/* ✅ 타이틀만 "가운데로" 보이게: 타이틀 컨테이너 marginBottom으로 중심 조정 */}
-                <View style={{ marginBottom: 24 }}>
-                    <Pressable onPress={toggleActions}>
-                        <Animated.View
-                            style={[
-                                { position: "relative", alignItems: "center" },
-                                { transform: [{ translateY: titleLift }, { scale: titlePulse }] },
-                            ]}
-                        >
-                            <View
-                                pointerEvents="none"
-                                style={{
-                                    position: "absolute",
-                                    top: -18,
-                                    bottom: -18,
-                                    left: -30,
-                                    right: -30,
-                                    borderRadius: 140,
-                                    backgroundColor: "#FFE3EE",
-                                    opacity: 0.6,
-                                }}
-                            />
-                            <View
-                                pointerEvents="none"
-                                style={{
-                                    position: "absolute",
-                                    top: -28,
-                                    bottom: -28,
-                                    left: -40,
-                                    right: -40,
-                                    borderRadius: 160,
-                                    borderWidth: 1,
-                                    borderColor: "#FFD0E3",
-                                    opacity: 0.7,
-                                }}
-                            />
-                            <Text
-                                style={{
-                                    fontSize: 96,
-                                    lineHeight: 104,
-                                    fontWeight: "800",
-                                    color: "#FF4D8D",
-                                    textAlign: "center",
-                                }}
-                            >
-                                {tt("appName")}
-                            </Text>
-                        </Animated.View>
-                    </Pressable>
-                </View>
-
-                {!showActions && (
-                    <Animated.Text
-                        style={{
-                            opacity: hintBlink,
-                            fontSize: 14,
-                            color: "#FF85A2",
-                            textAlign: "center",
-                        }}
-                    >
-                        {tt("tapTitle")}
-                    </Animated.Text>
-                )}
-
-                {/* actions */}
-                <Animated.View style={{ opacity: actionsFade, marginTop: 12 }}>
-                    <View
-                        style={{
-                            width: 280,
-                            borderRadius: 28,
-                            paddingVertical: 18,
-                            paddingHorizontal: 16,
-                            backgroundColor: "rgba(255, 255, 255, 0.78)",
-                            borderWidth: 1,
-                            borderColor: "#FFE0ED",
-                            shadowColor: "#FF6FAE",
-                            shadowOpacity: 0.2,
-                            shadowRadius: 18,
-                            shadowOffset: { width: 0, height: 12 },
-                            elevation: 7,
-                            alignItems: "center",
-                        }}
-                    >
-                        <View
-                            pointerEvents="none"
-                            style={{
-                                position: "absolute",
-                                top: -6,
-                                left: -6,
-                                right: -6,
-                                bottom: -6,
-                                borderRadius: 32,
-                                borderWidth: 1,
-                                borderColor: "rgba(255, 171, 205, 0.5)",
-                            }}
-                        />
-
-                        <View style={{ width: "100%", gap: 12 }}>
-                            <Pressable
-                                onPress={() => {
-                                    setShowLoginModal(true);
-                                    setLoginError(null);
-                                }}
-                            >
-                                <Text
-                                    style={{
-                                        width: "100%",
-                                        borderRadius: 999,
-                                        paddingVertical: 10,
-                                        textAlign: "center",
-                                        fontSize: 18,
-                                        fontWeight: "700",
-                                        color: "#FF4D8D",
-                                        backgroundColor: activeAction === "login" ? "#FFC4DA" : "#FFE3EE",
-                                    }}
-                                >
-                                    {tt("login")}
-                                </Text>
-                            </Pressable>
-
-                            <Pressable
-                                onPress={() => {
-                                    setShowSignupModal(true);
-                                    setSignupError(null);
-                                }}
-                            >
-                                <Text
-                                    style={{
-                                        width: "100%",
-                                        borderRadius: 999,
-                                        paddingVertical: 10,
-                                        textAlign: "center",
-                                        fontSize: 18,
-                                        fontWeight: "700",
-                                        color: "#FF4D8D",
-                                        backgroundColor: activeAction === "signup" ? "#FFBBD5" : "#FFD1E3",
-                                    }}
-                                >
-                                    {tt("signup")}
-                                </Text>
-                            </Pressable>
-
-                            <Pressable onPress={() => setShowExitModal(true)}>
-                                <Text
-                                    style={{
-                                        width: "100%",
-                                        borderRadius: 999,
-                                        paddingVertical: 10,
-                                        textAlign: "center",
-                                        fontSize: 18,
-                                        fontWeight: "700",
-                                        color: "#FF4D8D",
-                                        backgroundColor: activeAction === "exit" ? "#FFD7E6" : "#FFEFF5",
-                                    }}
-                                >
-                                    {tt("exit")}
-                                </Text>
-                            </Pressable>
-
-                            <Pressable onPress={() => setShowSettingsModal(true)}>
-                                <Text
-                                    style={{
-                                        width: "100%",
-                                        borderRadius: 999,
-                                        paddingVertical: 10,
-                                        textAlign: "center",
-                                        fontSize: 18,
-                                        fontWeight: "700",
-                                        color: "#FF4D8D",
-                                        backgroundColor: "#FFFFFF",
-                                    }}
-                                >
-                                    {tt("settings")}
-                                </Text>
-                            </Pressable>
-                        </View>
-                    </View>
-                </Animated.View>
-            </View>
-
-            {/* login modal */}
-            <Modal
-                transparent
-                visible={showLoginModal}
-                animationType="fade"
-                presentationStyle="overFullScreen"
-                statusBarTranslucent
-                onRequestClose={closeAuthModal}
-            >
-                <View
-                    style={[
-                        StyleSheet.absoluteFillObject,
-                        {
-                            alignItems: "center",
-                            justifyContent: "center",
-                            paddingHorizontal: 24,
-                            backgroundColor: "rgba(255, 77, 141, 0.38)",
-                        },
-                    ]}
-                >
-                    {hearts.map((heart, index) => {
-                        const floatY = heartAnims[index].interpolate({
-                            inputRange: [0, 1],
-                            outputRange: [8, -14],
-                        });
-                        const fade = heartAnims[index].interpolate({
-                            inputRange: [0, 0.5, 1],
-                            outputRange: [0.2, 0.6, 0.25],
-                        });
-
-                        return (
-                            <Animated.Text
-                                key={heart.key}
-                                pointerEvents="none"
-                                style={{
-                                    position: "absolute",
-                                    left: heart.x,
-                                    top: heart.y,
-                                    fontSize: heart.size,
-                                    color: "#FF8FB4",
-                                    opacity: fade,
-                                    transform: [{ translateY: floatY }],
-                                }}
-                            >
-                                ♥
-                            </Animated.Text>
-                        );
-                    })}
-
-                    <View
-                        style={{
-                            width: "100%",
-                            maxWidth: 380,
-                            borderRadius: 32,
-                            overflow: "hidden",
-                            backgroundColor: "#FFF7FB",
-                            shadowColor: "#FF4D8D",
-                            shadowOpacity: 0.28,
-                            shadowRadius: 28,
-                            shadowOffset: { width: 0, height: 18 },
-                            elevation: 14,
-                        }}
-                    >
-                        <Svg
-                            pointerEvents="none"
-                            style={StyleSheet.absoluteFill}
-                            viewBox="0 0 360 520"
-                            preserveAspectRatio="none"
-                        >
-                            <Defs>
-                                <LinearGradient id="cardGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-                                    <Stop offset="0%" stopColor="#FFF7FB" />
-                                    <Stop offset="100%" stopColor="#FFE5F0" />
-                                </LinearGradient>
-                                <LinearGradient id="heartInk" x1="0%" y1="0%" x2="100%" y2="0%">
-                                    <Stop offset="0%" stopColor="#FFD6E7" />
-                                    <Stop offset="100%" stopColor="#FFBFD6" />
-                                </LinearGradient>
-                                <Pattern id="heartPattern" width="48" height="48" patternUnits="userSpaceOnUse">
-                                    <SvgText x="6" y="26" fontSize="12" fill="url(#heartInk)" opacity="0.5">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="26" y="16" fontSize="10" fill="url(#heartInk)" opacity="0.35">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="30" y="38" fontSize="11" fill="url(#heartInk)" opacity="0.3">
-                                        ♡
-                                    </SvgText>
-                                </Pattern>
-                            </Defs>
-                            <Rect x="0" y="0" width="360" height="520" fill="url(#cardGlow)" />
-                            <Rect x="0" y="0" width="360" height="520" fill="url(#heartPattern)" opacity="0.7" />
-                        </Svg>
-
-                        <View style={{ paddingHorizontal: 24, paddingTop: 24, paddingBottom: 24 }}>
-                            <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }}>
-                                <View>
-                                    <Text style={{ fontSize: 24, fontWeight: "700", color: "#FF4D8D" }}>{tt("login")}</Text>
-                                    <Text style={{ marginTop: 4, fontSize: 12, color: "#FF8FB1" }}>{tt("heartWelcome")}</Text>
-                                </View>
-                                <Pressable
-                                    onPress={closeAuthModal}
-                                    style={{
-                                        height: 36,
-                                        width: 36,
-                                        borderRadius: 999,
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        backgroundColor: "#fff",
-                                        borderWidth: 1,
-                                        borderColor: "#FFE0ED",
-                                    }}
-                                >
-                                    <Text style={{ fontSize: 18, color: "#FF6FAE" }}>×</Text>
-                                </Pressable>
-                            </View>
-
-                            <Pressable
-                                style={{
-                                    marginTop: 20,
-                                    width: "100%",
-                                    borderRadius: 999,
-                                    borderWidth: 1,
-                                    borderColor: "#F0D7E2",
-                                    backgroundColor: "#fff",
-                                    paddingVertical: 12,
-                                }}
-                            >
-                                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                                    <Svg width={18} height={18} viewBox="0 0 18 18">
-                                        <Circle cx="9" cy="9" r="8" stroke="#FF4D8D" strokeWidth="2" fill="none" />
-                                        <Path d="M9 3a6 6 0 1 0 6 6h-6" stroke="#FF6FAE" strokeWidth="2" fill="none" />
-                                    </Svg>
-                                    <Text style={{ fontSize: 14, fontWeight: "700", color: "#FF4D8D" }}>
-                                        {tt("continueGoogle")}
-                                    </Text>
-                                </View>
-                            </Pressable>
-
-                            <View style={{ marginTop: 16, flexDirection: "row", alignItems: "center" }}>
-                                <View style={{ height: 1, flex: 1, backgroundColor: "#FFE0ED" }} />
-                                <Text style={{ marginHorizontal: 8, fontSize: 11, color: "#FF9BB7" }}>
-                                    {tt("loginWithEmail")}
-                                </Text>
-                                <View style={{ height: 1, flex: 1, backgroundColor: "#FFE0ED" }} />
-                            </View>
-
-                            <View style={{ marginTop: 16 }}>
-                                <Text style={{ marginBottom: 8, fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>
-                                    {tt("email")}
-                                </Text>
-                                <TextInput
-                                    style={{
-                                        borderRadius: 16,
-                                        backgroundColor: "#fff",
-                                        paddingHorizontal: 16,
-                                        paddingVertical: 12,
-                                        fontSize: 14,
-                                        color: "#FF4D8D",
-                                    }}
-                                    placeholder="you@example.com"
-                                    placeholderTextColor="#FFB3C8"
-                                    autoCapitalize="none"
-                                    keyboardType="email-address"
-                                    value={loginEmail}
-                                    onChangeText={setLoginEmail}
-                                />
-                            </View>
-
-                            <View style={{ marginTop: 12 }}>
-                                <Text style={{ marginBottom: 8, fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>
-                                    {tt("password")}
-                                </Text>
-                                <TextInput
-                                    style={{
-                                        borderRadius: 16,
-                                        backgroundColor: "#fff",
-                                        paddingHorizontal: 16,
-                                        paddingVertical: 12,
-                                        fontSize: 14,
-                                        color: "#FF4D8D",
-                                    }}
-                                    placeholder={tt("passwordPlaceholder")}
-                                    placeholderTextColor="#FFB3C8"
-                                    secureTextEntry
-                                    value={loginPassword}
-                                    onChangeText={setLoginPassword}
-                                />
-                            </View>
-
-                            {loginError && (
-                                <Text style={{ marginTop: 10, textAlign: "center", fontSize: 12, color: "#FF5D8C" }}>
-                                    {loginError}
-                                </Text>
-                            )}
-
-                            <Pressable style={{ marginTop: 18 }} onPress={handleLoginSubmit}>
-                                <View
-                                    style={{
-                                        borderRadius: 999,
-                                        overflow: "hidden",
-                                        width: "100%",
-                                        minHeight: 48,
-                                        justifyContent: "center",
-                                    }}
-                                >
-                                    <Svg
-                                        height={48}
-                                        width="100%"
-                                        viewBox="0 0 320 48"
-                                        preserveAspectRatio="none"
-                                        style={StyleSheet.absoluteFill}
-                                    >
-                                        <Defs>
-                                            <LinearGradient id="loveButton" x1="0%" y1="0%" x2="100%" y2="100%">
-                                                <Stop offset="0%" stopColor="#FF2F7B" />
-                                                <Stop offset="35%" stopColor="#FF5FA8" />
-                                                <Stop offset="70%" stopColor="#FF8EC7" />
-                                                <Stop offset="100%" stopColor="#FFD16B" />
-                                            </LinearGradient>
-                                        </Defs>
-                                        <Rect x="0" y="0" width="320" height="48" rx="24" fill="url(#loveButton)" />
-                                    </Svg>
-
-                                    <Text style={{ textAlign: "center", fontSize: 16, fontWeight: "800", color: "#fff" }}>
-                                        {tt("loginAction")}
-                                    </Text>
-
-                                    <Animated.View
-                                        pointerEvents="none"
-                                        style={{
-                                            position: "absolute",
-                                            top: -6,
-                                            left: 0,
-                                            height: 60,
-                                            width: 90,
-                                            backgroundColor: "rgba(255,255,255,0.45)",
-                                            borderRadius: 40,
-                                            transform: [
-                                                {
-                                                    translateX: shimmerAnim.interpolate({
-                                                        inputRange: [0, 1],
-                                                        outputRange: [-120, 360],
-                                                    }),
-                                                },
-                                                { skewX: "-20deg" as any },
-                                            ],
-                                        }}
-                                    />
-                                </View>
-                            </Pressable>
-
-                            <Text style={{ marginTop: 10, textAlign: "center", fontSize: 10, color: "#FF9BB7" }}>
-                                {tt("termsNotice")}
-                            </Text>
-                        </View>
-                    </View>
-                </View>
-            </Modal>
-
-            {/* signup modal */}
-            <Modal
-                transparent
-                visible={showSignupModal}
-                animationType="fade"
-                presentationStyle="overFullScreen"
-                statusBarTranslucent
-                onRequestClose={closeSignupModal}
-            >
-                <View
-                    style={[
-                        StyleSheet.absoluteFillObject,
-                        {
-                            alignItems: "center",
-                            justifyContent: "center",
-                            paddingHorizontal: 24,
-                            backgroundColor: "rgba(255, 77, 141, 0.38)",
-                        },
-                    ]}
-                >
-                    {hearts.map((heart, index) => {
-                        const floatY = heartAnims[index].interpolate({
-                            inputRange: [0, 1],
-                            outputRange: [8, -14],
-                        });
-                        const fade = heartAnims[index].interpolate({
-                            inputRange: [0, 0.5, 1],
-                            outputRange: [0.2, 0.6, 0.25],
-                        });
-
-                        return (
-                            <Animated.Text
-                                key={`signup-${heart.key}`}
-                                pointerEvents="none"
-                                style={{
-                                    position: "absolute",
-                                    left: heart.x,
-                                    top: heart.y,
-                                    fontSize: heart.size,
-                                    color: "#FF8FB4",
-                                    opacity: fade,
-                                    transform: [{ translateY: floatY }],
-                                }}
-                            >
-                                ♥
-                            </Animated.Text>
-                        );
-                    })}
-
-                    <View
-                        style={{
-                            width: "100%",
-                            maxWidth: 360,
-                            borderRadius: 28,
-                            overflow: "hidden",
-                            backgroundColor: "#FFF7FB",
-                            paddingHorizontal: 20,
-                            paddingVertical: 18,
-                            shadowColor: "#FF4D8D",
-                            shadowOpacity: 0.22,
-                            shadowRadius: 22,
-                            shadowOffset: { width: 0, height: 14 },
-                            elevation: 12,
-                        }}
-                    >
-                        <Svg
-                            pointerEvents="none"
-                            style={StyleSheet.absoluteFill}
-                            viewBox="0 0 360 520"
-                            preserveAspectRatio="none"
-                        >
-                            <Defs>
-                                <LinearGradient id="signupCardGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-                                    <Stop offset="0%" stopColor="#FFF7FB" />
-                                    <Stop offset="100%" stopColor="#FFE5F0" />
-                                </LinearGradient>
-                                <LinearGradient id="signupHeartInk" x1="0%" y1="0%" x2="100%" y2="0%">
-                                    <Stop offset="0%" stopColor="#FFD6E7" />
-                                    <Stop offset="100%" stopColor="#FFBFD6" />
-                                </LinearGradient>
-                                <Pattern id="signupHeartPattern" width="48" height="48" patternUnits="userSpaceOnUse">
-                                    <SvgText x="6" y="26" fontSize="12" fill="url(#signupHeartInk)" opacity="0.5">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="26" y="16" fontSize="10" fill="url(#signupHeartInk)" opacity="0.35">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="30" y="38" fontSize="11" fill="url(#signupHeartInk)" opacity="0.3">
-                                        ♡
-                                    </SvgText>
-                                </Pattern>
-                            </Defs>
-                            <Rect x="0" y="0" width="360" height="520" fill="url(#signupCardGlow)" />
-                            <Rect x="0" y="0" width="360" height="520" fill="url(#signupHeartPattern)" opacity="0.7" />
-                        </Svg>
-
-                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                            <View>
-                                <Text style={{ fontSize: 22, fontWeight: "700", color: "#FF4D8D" }}>
-                                    {tt("signupTitle")}
-                                </Text>
-                                <Text style={{ marginTop: 4, fontSize: 12, color: "#FF8FB1" }}>
-                                    {tt("signupSubtitle")}
-                                </Text>
-                            </View>
-                            <Pressable
-                                onPress={closeSignupModal}
-                                style={{
-                                    width: 32,
-                                    height: 32,
-                                    borderRadius: 16,
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    backgroundColor: "#FFFFFF",
-                                    borderWidth: 1,
-                                    borderColor: "#FFE0ED",
-                                }}
-                            >
-                                <Text style={{ fontSize: 16, color: "#FF6FAE" }}>×</Text>
-                            </Pressable>
-                        </View>
-
-                        <View style={{ marginTop: 14 }}>
-                            <Text style={{ marginBottom: 6, fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>
-                                {tt("email")}
-                            </Text>
-                            <TextInput
-                                style={{
-                                    borderRadius: 14,
-                                    backgroundColor: "#FFFFFF",
-                                    paddingHorizontal: 16,
-                                    paddingVertical: 12,
-                                    fontSize: 14,
-                                    color: "#FF4D8D",
-                                }}
-                                placeholder="you@example.com"
-                                placeholderTextColor="#FFB3C8"
-                                autoCapitalize="none"
-                                keyboardType="email-address"
-                                value={signupEmail}
-                                onChangeText={setSignupEmail}
-                            />
-                        </View>
-
-                        <View style={{ marginTop: 12 }}>
-                            <Text style={{ marginBottom: 6, fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>
-                                {tt("nickname")}
-                            </Text>
-                            <TextInput
-                                style={{
-                                    borderRadius: 14,
-                                    backgroundColor: "#FFFFFF",
-                                    paddingHorizontal: 16,
-                                    paddingVertical: 12,
-                                    fontSize: 14,
-                                    color: "#FF4D8D",
-                                }}
-                                placeholder="LovelyBridge"
-                                placeholderTextColor="#FFB3C8"
-                                value={signupNickname}
-                                onChangeText={setSignupNickname}
-                            />
-                        </View>
-
-                        <View style={{ marginTop: 12 }}>
-                            <Text style={{ marginBottom: 6, fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>
-                                {tt("password")}
-                            </Text>
-                            <TextInput
-                                style={{
-                                    borderRadius: 14,
-                                    backgroundColor: "#FFFFFF",
-                                    paddingHorizontal: 16,
-                                    paddingVertical: 12,
-                                    fontSize: 14,
-                                    color: "#FF4D8D",
-                                }}
-                                placeholder={tt("passwordHint")}
-                                placeholderTextColor="#FFB3C8"
-                                secureTextEntry
-                                value={signupPassword}
-                                onChangeText={setSignupPassword}
-                            />
-                            <Text style={{ marginTop: 6, fontSize: 11, color: "#FF9BB7" }}>
-                                {tt("passwordHint")}
-                            </Text>
-                        </View>
-
-                        {signupError && (
-                            <Text style={{ marginTop: 10, textAlign: "center", fontSize: 12, color: "#FF5D8C" }}>
-                                {signupError}
-                            </Text>
-                        )}
-
-                        <Pressable style={{ marginTop: 16 }} onPress={handleSignupSubmit}>
-                            <View style={{ borderRadius: 999, overflow: "hidden" }}>
-                                <Svg height={48} width="100%" viewBox="0 0 320 48" preserveAspectRatio="none">
-                                    <Defs>
-                                        <LinearGradient id="signupButton" x1="0%" y1="0%" x2="100%" y2="100%">
-                                            <Stop offset="0%" stopColor="#FF2F7B" />
-                                            <Stop offset="35%" stopColor="#FF5FA8" />
-                                            <Stop offset="70%" stopColor="#FF8EC7" />
-                                            <Stop offset="100%" stopColor="#FFD16B" />
-                                        </LinearGradient>
-                                    </Defs>
-                                    <Rect x="0" y="0" width="320" height="48" rx="24" fill="url(#signupButton)" />
-                                </Svg>
-                                <View
-                                    style={{
-                                        position: "absolute",
-                                        left: 0,
-                                        right: 0,
-                                        top: 0,
-                                        bottom: 0,
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                    }}
-                                >
-                                    <Text style={{ fontSize: 16, fontWeight: "700", color: "#FFFFFF" }}>
-                                        {tt("signupAction")}
-                                    </Text>
-                                </View>
-                            </View>
-                        </Pressable>
-
-                        <Pressable
-                            style={{ marginTop: 12 }}
-                            onPress={() => {
-                                setShowSignupModal(false);
-                                setShowLoginModal(true);
-                            }}
-                        >
-                            <Text style={{ textAlign: "center", fontSize: 12, color: "#FF9BB7" }}>
-                                {tt("backToLogin")}
-                            </Text>
-                        </Pressable>
-                    </View>
-                </View>
-            </Modal>
-
-            {/* settings modal */}
-            <Modal
-                transparent
-                visible={showSettingsModal}
-                animationType="fade"
-                presentationStyle="overFullScreen"
-                statusBarTranslucent
-                onRequestClose={closeSettingsModal}
-            >
-                <View
-                    style={[
-                        StyleSheet.absoluteFillObject,
-                        {
-                            alignItems: "center",
-                            justifyContent: "center",
-                            paddingHorizontal: 24,
-                            backgroundColor: "rgba(255, 77, 141, 0.38)",
-                        },
-                    ]}
-                >
-                    <View
-                        style={{
-                            width: "100%",
-                            maxWidth: 360,
-                            borderRadius: 28,
-                            overflow: "hidden",
-                            backgroundColor: "#FFF7FB",
-                            paddingHorizontal: 20,
-                            paddingVertical: 18,
-                            shadowColor: "#FF4D8D",
-                            shadowOpacity: 0.22,
-                            shadowRadius: 22,
-                            shadowOffset: { width: 0, height: 14 },
-                            elevation: 12,
-                        }}
-                    >
-                        <Svg
-                            pointerEvents="none"
-                            style={StyleSheet.absoluteFill}
-                            viewBox="0 0 360 420"
-                            preserveAspectRatio="none"
-                        >
-                            <Defs>
-                                <LinearGradient id="settingsCardGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-                                    <Stop offset="0%" stopColor="#FFF7FB" />
-                                    <Stop offset="100%" stopColor="#FFE5F0" />
-                                </LinearGradient>
-                                <LinearGradient id="settingsHeartInk" x1="0%" y1="0%" x2="100%" y2="0%">
-                                    <Stop offset="0%" stopColor="#FFD6E7" />
-                                    <Stop offset="100%" stopColor="#FFBFD6" />
-                                </LinearGradient>
-                                <Pattern id="settingsHeartPattern" width="48" height="48" patternUnits="userSpaceOnUse">
-                                    <SvgText x="6" y="26" fontSize="12" fill="url(#settingsHeartInk)" opacity="0.5">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="26" y="16" fontSize="10" fill="url(#settingsHeartInk)" opacity="0.35">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="30" y="38" fontSize="11" fill="url(#settingsHeartInk)" opacity="0.3">
-                                        ♡
-                                    </SvgText>
-                                </Pattern>
-                            </Defs>
-                            <Rect x="0" y="0" width="360" height="420" fill="url(#settingsCardGlow)" />
-                            <Rect x="0" y="0" width="360" height="420" fill="url(#settingsHeartPattern)" opacity="0.7" />
-                        </Svg>
-
-                        <View style={{ flexDirection: "row", alignItems: "center" }}>
-                            <View style={{ flex: 1, paddingRight: 12 }}>
-                                <Text
-                                    style={{ fontSize: 22, fontWeight: "700", color: "#FF4D8D" }}
-                                    numberOfLines={1}
-                                    ellipsizeMode="tail"
-                                >
-                                    {tt("settings")}
-                                </Text>
-                                <Text style={{ marginTop: 4, fontSize: 12, color: "#FF8FB1" }}>
-                                    {tt("languageHelp")}
-                                </Text>
-                            </View>
-                            <Pressable
-                                onPress={closeSettingsModal}
-                                style={{
-                                    width: 32,
-                                    height: 32,
-                                    borderRadius: 16,
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    backgroundColor: "#FFFFFF",
-                                    borderWidth: 1,
-                                    borderColor: "#FFE0ED",
-                                }}
-                            >
-                                <Text style={{ fontSize: 16, color: "#FF6FAE" }}>×</Text>
-                            </Pressable>
-                        </View>
-
-                        <Text style={{ marginTop: 14, fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>
-                            {tt("language")}
-                        </Text>
-                        <View style={{ marginTop: 12, gap: 8 }}>
-                            {options.map((option) => {
-                                const active = option.value === locale;
-                                return (
-                                    <Pressable
-                                        key={option.value}
-                                        onPress={() => {
-                                            if (option.value !== locale) {
-                                                setLocale(option.value);
-                                                showSavedToast();
-                                            }
-                                        }}
-                                        style={{
-                                            flexDirection: "row",
-                                            alignItems: "center",
-                                            borderRadius: 16,
-                                            paddingHorizontal: 14,
-                                            paddingVertical: 10,
-                                            backgroundColor: active ? "#FFE3EE" : "rgba(255,255,255,0.9)",
-                                            borderWidth: 1,
-                                            borderColor: active ? "#FFBBD5" : "#FFE7F1",
-                                        }}
-                                    >
-                                        <View
-                                            style={{
-                                                marginRight: 12,
-                                                width: 16,
-                                                height: 16,
-                                                borderRadius: 8,
-                                                alignItems: "center",
-                                                justifyContent: "center",
-                                                borderWidth: 1,
-                                                borderColor: active ? "#FF3B82" : "#FFB2C7",
-                                            }}
-                                        >
-                                            {active && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: "#FF3B82" }} />}
-                                        </View>
-                                        <Text style={{ fontSize: 14, fontWeight: "600", color: active ? "#FF3B82" : "#FF7EA6" }}>
-                                            {option.label}
-                                        </Text>
-                                    </Pressable>
-                                );
-                            })}
-                        </View>
-                    </View>
-
-                    {showSettingsToast && (
-                        <Animated.View
-                            pointerEvents="none"
-                            style={{
-                                position: "absolute",
-                                bottom: 40,
-                                left: 24,
-                                right: 24,
-                                borderRadius: 16,
-                                backgroundColor: "#FF4D8D",
-                                paddingVertical: 10,
-                                paddingHorizontal: 16,
-                                transform: [
-                                    {
-                                        translateY: settingsToastAnim.interpolate({
-                                            inputRange: [0, 1],
-                                            outputRange: [10, 0],
-                                        }),
-                                    },
-                                ],
-                                opacity: settingsToastAnim,
-                            }}
-                        >
-                            <Text style={{ textAlign: "center", fontSize: 13, fontWeight: "700", color: "#FFFFFF" }}>
-                                ❤ {tt("languageSaved")}
-                            </Text>
-                        </Animated.View>
-                    )}
-                </View>
-            </Modal>
-
-            {/* exit modal */}
-            <Modal
-                transparent
-                visible={showExitModal}
-                animationType="fade"
-                presentationStyle="overFullScreen"
-                statusBarTranslucent
-                onRequestClose={closeExitModal}
-            >
-                <View
-                    style={[
-                        StyleSheet.absoluteFillObject,
-                        {
-                            alignItems: "center",
-                            justifyContent: "center",
-                            paddingHorizontal: 24,
-                            backgroundColor: "rgba(255, 77, 141, 0.38)",
-                        },
-                    ]}
-                >
-                    <View
-                        style={{
-                            width: "100%",
-                            maxWidth: 340,
-                            borderRadius: 26,
-                            overflow: "hidden",
-                            backgroundColor: "#FFF7FB",
-                            paddingHorizontal: 20,
-                            paddingVertical: 18,
-                            shadowColor: "#FF4D8D",
-                            shadowOpacity: 0.22,
-                            shadowRadius: 20,
-                            shadowOffset: { width: 0, height: 12 },
-                            elevation: 10,
-                        }}
-                    >
-                        <Svg
-                            pointerEvents="none"
-                            style={StyleSheet.absoluteFill}
-                            viewBox="0 0 340 260"
-                            preserveAspectRatio="none"
-                        >
-                            <Defs>
-                                <LinearGradient id="exitCardGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-                                    <Stop offset="0%" stopColor="#FFF7FB" />
-                                    <Stop offset="100%" stopColor="#FFE5F0" />
-                                </LinearGradient>
-                                <LinearGradient id="exitHeartInk" x1="0%" y1="0%" x2="100%" y2="0%">
-                                    <Stop offset="0%" stopColor="#FFD6E7" />
-                                    <Stop offset="100%" stopColor="#FFBFD6" />
-                                </LinearGradient>
-                                <Pattern id="exitHeartPattern" width="48" height="48" patternUnits="userSpaceOnUse">
-                                    <SvgText x="6" y="26" fontSize="12" fill="url(#exitHeartInk)" opacity="0.5">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="26" y="16" fontSize="10" fill="url(#exitHeartInk)" opacity="0.35">
-                                        ♡
-                                    </SvgText>
-                                    <SvgText x="30" y="38" fontSize="11" fill="url(#exitHeartInk)" opacity="0.3">
-                                        ♡
-                                    </SvgText>
-                                </Pattern>
-                            </Defs>
-                            <Rect x="0" y="0" width="340" height="260" fill="url(#exitCardGlow)" />
-                            <Rect x="0" y="0" width="340" height="260" fill="url(#exitHeartPattern)" opacity="0.7" />
-                        </Svg>
-
-                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                            <View>
-                                <Text style={{ fontSize: 20, fontWeight: "700", color: "#FF4D8D" }}>
-                                    {tt("exit")}
-                                </Text>
-                                <Text style={{ marginTop: 4, fontSize: 12, color: "#FF8FB1" }}>
-                                    {tt("seeYouSoon")}
-                                </Text>
-                            </View>
-                            <Pressable
-                                onPress={closeExitModal}
-                                style={{
-                                    width: 32,
-                                    height: 32,
-                                    borderRadius: 16,
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    backgroundColor: "#FFFFFF",
-                                    borderWidth: 1,
-                                    borderColor: "#FFE0ED",
-                                }}
-                            >
-                                <Text style={{ fontSize: 16, color: "#FF6FAE" }}>×</Text>
-                            </Pressable>
-                        </View>
-
-                        <Text style={{ marginTop: 14, fontSize: 13, color: "#FF7EA6", textAlign: "center" }}>
-                            {tt("exitConfirm")}
-                        </Text>
-
-                        <View style={{ marginTop: 16, gap: 10 }}>
-                            <Pressable onPress={closeExitModal}>
-                                <Text
-                                    style={{
-                                        width: "100%",
-                                        borderRadius: 999,
-                                        paddingVertical: 10,
-                                        textAlign: "center",
-                                        fontSize: 16,
-                                        fontWeight: "600",
-                                        color: "#FF4D8D",
-                                        backgroundColor: "#FFE3EE",
-                                    }}
-                                >
-                                    {tt("close")}
-                                </Text>
-                            </Pressable>
-                            <Pressable onPress={() => BackHandler.exitApp()}>
-                                <Text
-                                    style={{
-                                        width: "100%",
-                                        borderRadius: 999,
-                                        paddingVertical: 10,
-                                        textAlign: "center",
-                                        fontSize: 16,
-                                        fontWeight: "700",
-                                        color: "#FFFFFF",
-                                        backgroundColor: "#FF4D8D",
-                                    }}
-                                >
-                                    {tt("exitAction")}
-                                </Text>
-                            </Pressable>
-                        </View>
-                    </View>
-                </View>
-            </Modal>
+            />
         </View>
     );
 }
