@@ -238,9 +238,13 @@ export default function HomeSignupModal({
                             }}
                             placeholder={tt("passwordHint")}
                             placeholderTextColor="#FFB3C8"
+                            autoCapitalize="none"
+                            autoCorrect={false}
                             secureTextEntry
                             autoComplete="off"
                             textContentType="none"
+                            importantForAutofill="no"
+                            passwordRules=""
                             value={signupPassword}
                             onChangeText={setSignupPassword}
                         />
@@ -262,9 +266,13 @@ export default function HomeSignupModal({
                             }}
                             placeholder={tt("passwordConfirmPlaceholder")}
                             placeholderTextColor="#FFB3C8"
+                            autoCapitalize="none"
+                            autoCorrect={false}
                             secureTextEntry
                             autoComplete="off"
                             textContentType="none"
+                            importantForAutofill="no"
+                            passwordRules=""
                             value={signupPasswordConfirm}
                             onChangeText={setSignupPasswordConfirm}
                         />
