@@ -30,12 +30,15 @@ export default function HomeTitleSection({
     const baseSize = width * 0.17;
     const titleFontSize = Math.min(baseSize, 90);
 
+    const topFlex = showActions ? 1 : 0.75;
+    const bottomFlex = showActions ? 0 : 0.25;
+
     return (
         <View style={{ flex: 1 }}>
             {/* 🔹 상단 영역 */}
             <View
                 style={{
-                    flex: 1,
+                    flex: topFlex,
                     justifyContent: "center",
                     alignItems: "center",
                 }}
@@ -81,7 +84,7 @@ export default function HomeTitleSection({
             {!showActions && (
                 <View
                     style={{
-                        flex: 1,
+                        flex: bottomFlex,
                         justifyContent: "center",
                         alignItems: "center",
                     }}

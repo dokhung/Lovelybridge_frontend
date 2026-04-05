@@ -244,6 +244,12 @@ export default function SignUp() {
                             className="rounded-2xl bg-white px-4 py-3 text-[14px] text-[#FF4D8D]"
                             placeholder={t("passwordHint")}
                             placeholderTextColor="#FFB3C8"
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            autoComplete="off"
+                            textContentType="none"
+                            importantForAutofill="no"
+                            passwordRules=""
                             secureTextEntry
                             value={password}
                             onChangeText={setPassword}
