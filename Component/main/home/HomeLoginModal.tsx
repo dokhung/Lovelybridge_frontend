@@ -57,7 +57,6 @@ export default function HomeLoginModal({
     setLoginPassword,
     loginError,
     onSubmit,
-    onGooglePress,
 }: Props) {
     return (
         <Modal
@@ -174,37 +173,6 @@ export default function HomeLoginModal({
                             >
                                 <Text style={{ fontSize: 18, color: "#FF6FAE" }}>×</Text>
                             </Pressable>
-                        </View>
-
-                        <Pressable
-                            onPress={onGooglePress}
-                            style={{
-                                marginTop: 20,
-                                width: "100%",
-                                borderRadius: 999,
-                                borderWidth: 1,
-                                borderColor: "#F0D7E2",
-                                backgroundColor: "#fff",
-                                paddingVertical: 12,
-                            }}
-                        >
-                            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                                <Svg width={18} height={18} viewBox="0 0 18 18">
-                                    <Circle cx="9" cy="9" r="8" stroke="#FF4D8D" strokeWidth="2" fill="none" />
-                                    <Path d="M9 3a6 6 0 1 0 6 6h-6" stroke="#FF6FAE" strokeWidth="2" fill="none" />
-                                </Svg>
-                                <Text style={{ fontSize: 14, fontWeight: "700", color: "#FF4D8D" }}>
-                                    {tt("continueGoogle")}
-                                </Text>
-                            </View>
-                        </Pressable>
-
-                        <View style={{ marginTop: 16, flexDirection: "row", alignItems: "center" }}>
-                            <View style={{ height: 1, flex: 1, backgroundColor: "#FFE0ED" }} />
-                            <Text style={{ marginHorizontal: 8, fontSize: 11, color: "#FF9BB7" }}>
-                                {tt("loginWithEmail")}
-                            </Text>
-                            <View style={{ height: 1, flex: 1, backgroundColor: "#FFE0ED" }} />
                         </View>
 
                         <View style={{ marginTop: 16 }}>
