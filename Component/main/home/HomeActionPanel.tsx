@@ -24,7 +24,7 @@ export default function HomeActionPanel({
     onSettingsPress,
 }: Props) {
     return (
-        <Animated.View style={{ opacity: actionsFade, marginTop: 36 }}>
+        <Animated.View style={{ opacity: actionsFade }}>
             <View
                 style={{
                     width: 280,
@@ -56,7 +56,7 @@ export default function HomeActionPanel({
                     }}
                 />
 
-                <View style={{ width: "100%", gap: 12 }}>
+                <View style={{ width: "100%", gap: 10 }}>
                     <Pressable onPress={onLoginPress}>
                         <Text
                             style={{

@@ -37,23 +37,6 @@ export default function Login() {
         <SafeAreaView style={{ flex: 1, backgroundColor: "#FFF0F6" }}>
             <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24 }}>
                 <View style={{ width: "100%", maxWidth: 360 }}>
-                    {/* Google Login */}
-                    <Pressable
-                        style={{
-                            marginBottom: 16,
-                            borderRadius: 999,
-                            borderWidth: 1,
-                            borderColor: "#F0D7E2",
-                            backgroundColor: "#fff",
-                            paddingVertical: 12,
-                        }}
-                    >
-                        <View style={{ alignItems: "center" }}>
-                            <Text style={{ fontSize: 14, fontWeight: "700", color: "#FF4D8D" }}>
-                                {tt("continueGoogle")}
-                            </Text>
-                        </View>
-                    </Pressable>
 
                     {/* Email */}
                     <Text style={{ fontSize: 12, fontWeight: "700", color: "#FF6F9C" }}>{tt("email")}</Text>

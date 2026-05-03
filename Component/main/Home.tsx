@@ -240,7 +240,7 @@ export default function Home() {
         setShowActions(true);
         Animated.parallel([
             Animated.timing(titleLift, {
-                toValue: -64,
+                    toValue: -155,
                 duration: 420,
                 useNativeDriver: true,
             }),

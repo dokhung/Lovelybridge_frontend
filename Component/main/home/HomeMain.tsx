@@ -81,15 +81,26 @@ export default function HomeMain({
                 onPress={toggleActions}
             />
 
-            <HomeActionPanel
-                tt={tt}
-                actionsFade={actionsFade}
-                activeAction={activeAction}
-                onLoginPress={onLoginPress}
-                onSignupPress={onSignupPress}
-                onExitPress={onExitPress}
-                onSettingsPress={onSettingsPress}
-            />
+            <View
+                pointerEvents={showActions ? "auto" : "none"}
+                style={{
+                    position: "absolute",
+                    top: "58%",
+                    left: 0,
+                    right: 0,
+                    alignItems: "center",
+                }}
+            >
+                <HomeActionPanel
+                    tt={tt}
+                    actionsFade={actionsFade}
+                    activeAction={activeAction}
+                    onLoginPress={onLoginPress}
+                    onSignupPress={onSignupPress}
+                    onExitPress={onExitPress}
+                    onSettingsPress={onSettingsPress}
+                />
+            </View>
         </View>
     );
 }
